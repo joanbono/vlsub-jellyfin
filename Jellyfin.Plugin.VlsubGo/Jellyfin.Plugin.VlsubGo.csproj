@@ -17,9 +17,16 @@
       ExcludeAssets="runtime" keeps the Jellyfin assemblies out of the plugin
       output. The host already provides them, and shipping copies risks loading
       a different build than the server is running.
+
+      The versions are pinned exactly, and deliberately to the OLDEST 10.11
+      release rather than the newest. Jellyfin refuses to load a plugin that
+      references a shared library newer than the host's own, so building against
+      10.11.11 breaks every server below that. Pinning the floor matches the
+      targetAbi in build.yaml and works across all of 10.11.x. A floating
+      "10.11.*" silently re-breaks this the moment a new patch ships.
     -->
-    <PackageReference Include="Jellyfin.Controller" Version="10.11.*" ExcludeAssets="runtime" />
-    <PackageReference Include="Jellyfin.Model" Version="10.11.*" ExcludeAssets="runtime" />
+    <PackageReference Include="Jellyfin.Controller" Version="[10.11.0]" ExcludeAssets="runtime" />
+    <PackageReference Include="Jellyfin.Model" Version="[10.11.0]" ExcludeAssets="runtime" />
   </ItemGroup>
 
   <ItemGroup>
