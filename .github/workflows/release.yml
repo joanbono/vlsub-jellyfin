@@ -1,0 +1,241 @@
+name: Release
+
+# Bump VERSION and push to main; this tags and publishes automatically.
+#
+#   echo 1.0.1.0 > VERSION
+#   git commit -am "Release 1.0.1.0" && git push
+#
+# Tagging happens inside this workflow on purpose: a tag pushed with
+# GITHUB_TOKEN does not trigger further workflow runs, so a split auto-tag
+# design would tag and then build nothing.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      release: ${{ steps.plan.outputs.release }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Decide what to build
+        id: plan
+        run: |
+          set -euo pipefail
+
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            tag="$GITHUB_REF_NAME"
+            version="${tag#v}"
+            release=true
+            reason="tag $tag was pushed"
+          else
+            if [ ! -f VERSION ]; then
+              echo "::error::VERSION file is missing"
+              exit 1
+            fi
+
+            version="$(tr -d '[:space:]' < VERSION)"
+            # Jellyfin wants a four-part assembly version.
+            if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::VERSION must be four numeric parts like 1.0.0.0, got '$version'"
+              exit 1
+            fi
+            tag="v$version"
+
+            if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+              release=false
+              reason="$tag is already tagged, nothing to do"
+            elif [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+              release=false
+              reason="manual run, building $version without publishing"
+            else
+              release=true
+              reason="VERSION names $version, which is not tagged yet"
+            fi
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "**$tag** - $reason" >> "$GITHUB_STEP_SUMMARY"
+
+  package:
+    needs: plan
+    if: needs.plan.outputs.release == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "9.0.x"
+
+      - name: Test
+        run: dotnet test -c Release
+
+      - name: Build and package
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          dotnet publish Jellyfin.Plugin.VlsubGo \
+            -c Release \
+            -o publish \
+            -p:Version="$VERSION" \
+            -p:AssemblyVersion="$VERSION" \
+            -p:FileVersion="$VERSION"
+
+          mkdir -p dist/plugin
+
+          # Only the plugin assembly ships; the host provides the rest.
+          cp publish/Jellyfin.Plugin.VlsubGo.dll dist/plugin/
+
+          targetAbi="$(grep -E '^targetAbi:' build.yaml | sed 's/.*"\(.*\)".*/\1/')"
+
+          # Built with jq rather than a heredoc: inside a YAML block scalar the
+          # closing delimiter cannot sit at column 0, and an indented delimiter
+          # does not terminate a heredoc.
+          jq -n \
+            --arg version "$VERSION" \
+            --arg abi "$targetAbi" \
+            '{
+              category: "Subtitles",
+              guid: "7c9e6a41-3b5d-4f28-9a1c-6d2e8b4f7a13",
+              name: "vlsub-go",
+              overview: "Subtitles from opensubtitles.org, matched by file hash. No API key.",
+              description: "Downloads subtitles from the keyless XML-RPC API on opensubtitles.org, matched by file hash so results are timed against your exact release. Repairs uploads whose multi-line cues were split across duplicate timings.",
+              owner: "joanbono",
+              targetAbi: $abi,
+              version: $version,
+              status: "Active",
+              autoUpdate: false,
+              assemblies: []
+            }' > dist/plugin/meta.json
+
+          cat dist/plugin/meta.json
+
+          zip="vlsub-go_${VERSION}.zip"
+          (cd dist/plugin && zip -qr "../${zip}" .)
+
+          cd dist
+          md5sum "$zip" | tee checksum.md5
+          sha256sum "$zip" | tee checksums.txt
+          ls -la
+
+          {
+            echo "### Plugin package"
+            echo '```'
+            unzip -l "$zip"
+            echo '```'
+            echo "md5: \`$(md5sum "$zip" | cut -d' ' -f1)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: plugin
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: [plan, package]
+    if: needs.plan.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The manifest commit lands on main, so check that out rather than
+          # the detached commit the trigger may point at.
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: plugin
+          path: dist
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # gh creates the tag itself, pointing at this commit.
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --target "$GITHUB_SHA" \
+            --generate-notes \
+            dist/*
+
+      # Updating the manifest after the release exists means sourceUrl already
+      # resolves by the time Jellyfin reads it.
+      - name: Update the plugin repository manifest
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          zip="vlsub-go_${VERSION}.zip"
+          # Jellyfin verifies plugin packages with md5, not sha256.
+          md5="$(cut -d' ' -f1 < dist/checksum.md5)"
+          stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          abi="$(grep -E '^targetAbi:' build.yaml | sed 's/.*"\(.*\)".*/\1/')"
+
+          entry="$(jq -n \
+            --arg version "$VERSION" \
+            --arg abi "$abi" \
+            --arg md5 "$md5" \
+            --arg url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${zip}" \
+            --arg ts "$stamp" \
+            --arg log "Release ${TAG}" \
+            '{version: $version, changelog: $log, targetAbi: $abi,
+              sourceUrl: $url, checksum: $md5, timestamp: $ts}')"
+
+          if [ -f manifest.json ]; then
+            # Newest first, and drop any same-numbered entry so re-running a
+            # release cannot duplicate it.
+            jq --argjson e "$entry" \
+              '.[0].versions = ([$e] + (.[0].versions | map(select(.version != $e.version))))' \
+              manifest.json > manifest.tmp
+          else
+            jq -n --argjson e "$entry" '[{
+              guid: "7c9e6a41-3b5d-4f28-9a1c-6d2e8b4f7a13",
+              name: "vlsub-go",
+              description: "Subtitles from opensubtitles.org, matched by file hash. No account or API key required. Also repairs uploads whose multi-line cues were split across duplicate timings.",
+              overview: "Keyless OpenSubtitles provider with split-cue repair",
+              owner: "joanbono",
+              category: "Subtitles",
+              versions: [$e]
+            }]' > manifest.tmp
+          fi
+          mv manifest.tmp manifest.json
+          jq . manifest.json
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add manifest.json
+
+          if git diff --cached --quiet; then
+            echo "manifest unchanged"
+            exit 0
+          fi
+
+          # A push made with GITHUB_TOKEN does not trigger workflows, so this
+          # cannot loop back into another release run.
+          git commit -m "Update plugin manifest for ${TAG} [skip ci]"
+          git pull --rebase --autostash origin main
+          git push origin HEAD:main
+
+          echo "Manifest updated for ${TAG}" >> "$GITHUB_STEP_SUMMARY"

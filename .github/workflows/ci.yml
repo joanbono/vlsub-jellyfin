@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "9.0.x"
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build -c Release --no-restore
+
+      - name: Test
+        run: dotnet test -c Release --no-build --verbosity normal
+
+      - name: Confirm no Jellyfin assemblies are shipped
+        run: |
+          set -euo pipefail
+          out=Jellyfin.Plugin.VlsubGo/bin/Release/net9.0
+          echo "Plugin output:"
+          ls -la "$out"
+          # The host provides these; shipping copies risks loading the wrong build.
+          if ls "$out" | grep -Eq '^(MediaBrowser|Jellyfin\.(Data|Model|Common|Controller|Extensions))'; then
+            echo "::error::Jellyfin assemblies leaked into the plugin output"
+            exit 1
+          fi

@@ -1,0 +1,18 @@
+---
+name: "vlsub-go"
+guid: "7c9e6a41-3b5d-4f28-9a1c-6d2e8b4f7a13"
+version: "1.0.0.0"
+targetAbi: "10.11.0.0"
+framework: "net9.0"
+owner: "joanbono"
+category: "Subtitles"
+overview: "Subtitles from opensubtitles.org, matched by file hash. No API key."
+description: >
+  Downloads subtitles from the keyless XML-RPC API on opensubtitles.org, the same
+  one the vlsub VLC extension uses. Files are identified by their OpenSubtitles
+  hash, so a match is timed against your exact release rather than merely the
+  right title. Also repairs uploads whose multi-line cues were split across
+  duplicate timings, which otherwise render bottom-to-top.
+artifacts:
+  - "Jellyfin.Plugin.VlsubGo.dll"
+changelog: ""
