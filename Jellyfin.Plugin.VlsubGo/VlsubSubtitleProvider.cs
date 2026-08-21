@@ -20,7 +20,14 @@ public class VlsubSubtitleProvider : ISubtitleProvider
     public VlsubSubtitleProvider(ILogger<VlsubSubtitleProvider> logger, IHttpClientFactory httpClientFactory)
     {
         _logger = logger;
-        _client = new OpenSubtitlesOrgClient(httpClientFactory.CreateClient(NamedClient), logger);
+
+        var http = httpClientFactory.CreateClient(NamedClient);
+        // An explicit, short timeout. The default is 100 seconds, long enough
+        // that a stalled upstream would keep a subtitle search hanging well past
+        // the point a user assumes the server is broken.
+        http.Timeout = TimeSpan.FromSeconds(20);
+
+        _client = new OpenSubtitlesOrgClient(http, logger);
     }
 
     /// <summary>
@@ -39,29 +46,63 @@ public class VlsubSubtitleProvider : ISubtitleProvider
     public async Task<IEnumerable<RemoteSubtitleInfo>> Search(
         SubtitleSearchRequest request, CancellationToken cancellationToken)
     {
-        // The .org API keys subtitles by ISO 639-2/B, which is what Jellyfin
-        // puts in Language; TwoLetterISOLanguageName is the ISO 639-1 form.
+        // Logged unconditionally and at Information: without it there is no way
+        // to tell "never invoked" apart from "invoked and returned nothing",
+        // which are very different faults.
+        _logger.LogInformation(
+            "vlsub-go: search invoked. lang={Language} twoLetter={TwoLetter} type={ContentType} " +
+            "name={Name} series={Series} s={Season} e={Episode} path={Path}",
+            request.Language,
+            request.TwoLetterISOLanguageName,
+            request.ContentType,
+            request.Name,
+            request.SeriesName,
+            request.ParentIndexNumber,
+            request.IndexNumber,
+            request.MediaPath);
+
+        // The .org API keys subtitles by ISO 639-2/B. Jellyfin normally puts
+        // that in Language, but fall back to the two-letter form rather than
+        // giving up, since an empty language silently yields no results.
         var language = request.Language;
         if (string.IsNullOrWhiteSpace(language))
         {
-            _logger.LogDebug("vlsub-go: search skipped, no language on the request");
+            language = request.TwoLetterISOLanguageName;
+        }
+
+        if (string.IsNullOrWhiteSpace(language))
+        {
+            _logger.LogWarning("vlsub-go: search skipped, the request carried no language");
             return Array.Empty<RemoteSubtitleInfo>();
         }
 
-        string? hash = null;
-        long size = 0;
+        // A two-letter code has to be translated; the .org API only knows 639-2/B.
+        if (language.Length == 2 && LanguageCodes.TryGetThreeLetter(language, out var threeLetter))
+        {
+            _logger.LogInformation("vlsub-go: mapped language {Two} to {Three}", language, threeLetter);
+            language = threeLetter;
+        }
+
+        var movieHash = MovieHash.None;
         if (!string.IsNullOrEmpty(request.MediaPath))
         {
             try
             {
-                if (OpenSubtitlesHash.TryCompute(request.MediaPath, out var computed, out var length))
+                movieHash = await OpenSubtitlesHash
+                    .ComputeAsync(request.MediaPath, cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (movieHash.IsValid)
                 {
-                    hash = computed;
-                    size = length;
+                    _logger.LogInformation(
+                        "vlsub-go: hashed {Path} as {Hash} ({Size} bytes)",
+                        request.MediaPath, movieHash.Value, movieHash.Size);
                 }
                 else
                 {
-                    _logger.LogDebug("vlsub-go: {Path} too small to hash", request.MediaPath);
+                    _logger.LogInformation(
+                        "vlsub-go: no hash for {Path}, it is missing or under 128 KiB",
+                        request.MediaPath);
                 }
             }
             catch (IOException ex)
@@ -80,15 +121,18 @@ public class VlsubSubtitleProvider : ISubtitleProvider
         {
             candidates = await _client.SearchAsync(
                 language,
-                hash,
-                size,
+                movieHash.IsValid ? movieHash.Value : null,
+                movieHash.Size,
                 title,
                 request.ParentIndexNumber,
                 request.IndexNumber,
                 cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException or TaskCanceledException)
+        catch (Exception ex)
         {
+            // Deliberately broad: a provider that throws breaks the whole
+            // subtitle search dialog, and a narrow filter previously let
+            // unexpected exception types escape unlogged.
             _logger.LogError(ex, "vlsub-go: search failed");
             return Array.Empty<RemoteSubtitleInfo>();
         }
