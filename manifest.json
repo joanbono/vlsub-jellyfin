@@ -1,0 +1,20 @@
+[
+  {
+    "guid": "7c9e6a41-3b5d-4f28-9a1c-6d2e8b4f7a13",
+    "name": "vlsub-go",
+    "description": "Subtitles from opensubtitles.org, matched by file hash. No account or API key required. Also repairs uploads whose multi-line cues were split across duplicate timings.",
+    "overview": "Keyless OpenSubtitles provider with split-cue repair",
+    "owner": "joanbono",
+    "category": "Subtitles",
+    "versions": [
+      {
+        "version": "1.0.0.0",
+        "changelog": "Release v1.0.0.0",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/joanbono/vlsub-jellyfin/releases/download/v1.0.0.0/vlsub-go_1.0.0.0.zip",
+        "checksum": "93e6d71a53af966449e4877ae7798214",
+        "timestamp": "2026-08-21T10:44:01Z"
+      }
+    ]
+  }
+]
