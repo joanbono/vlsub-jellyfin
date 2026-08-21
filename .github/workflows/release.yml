@@ -95,10 +95,13 @@ jobs:
             -p:AssemblyVersion="$VERSION" \
             -p:FileVersion="$VERSION"
 
-          mkdir -p dist/plugin
+          # staging/ holds the zip contents, dist/ holds only release files.
+          # Keeping them apart matters: a directory inside dist/ ends up in the
+          # artifact and then breaks "gh release create", which cannot upload one.
+          mkdir -p staging dist
 
           # Only the plugin assembly ships; the host provides the rest.
-          cp publish/Jellyfin.Plugin.VlsubGo.dll dist/plugin/
+          cp publish/Jellyfin.Plugin.VlsubGo.dll staging/
 
           targetAbi="$(grep -E '^targetAbi:' build.yaml | sed 's/.*"\(.*\)".*/\1/')"
 
@@ -120,14 +123,17 @@ jobs:
               status: "Active",
               autoUpdate: false,
               assemblies: []
-            }' > dist/plugin/meta.json
+            }' > staging/meta.json
 
-          cat dist/plugin/meta.json
+          cat staging/meta.json
 
           zip="vlsub-go_${VERSION}.zip"
-          (cd dist/plugin && zip -qr "../${zip}" .)
+          (cd staging && zip -qr "../dist/${zip}" .)
 
           cd dist
+          echo "dist/ must contain files only:"
+          find . -mindepth 1 -maxdepth 1 -type d -exec false {} + \
+            || { echo "::error::dist/ contains a directory"; exit 1; }
           md5sum "$zip" | tee checksum.md5
           sha256sum "$zip" | tee checksums.txt
           ls -la
@@ -171,12 +177,14 @@ jobs:
           TAG: ${{ needs.plan.outputs.tag }}
         run: |
           set -euo pipefail
-          # gh creates the tag itself, pointing at this commit.
+          # gh creates the tag itself, pointing at this commit. The assets are
+          # listed explicitly rather than as dist/* so a stray directory cannot
+          # fail the upload after the release has already been created.
           gh release create "$TAG" \
             --title "$TAG" \
             --target "$GITHUB_SHA" \
             --generate-notes \
-            dist/*
+            dist/*.zip dist/checksum.md5 dist/checksums.txt
 
       # Updating the manifest after the release exists means sourceUrl already
       # resolves by the time Jellyfin reads it.
